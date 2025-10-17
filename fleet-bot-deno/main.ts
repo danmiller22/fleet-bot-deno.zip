@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 /**
  * Fleet Reports Bot — Deno Deploy + Telegram
- * One-file. KV-backed.
+ * One-file. KV-backed. Context keyboards on every step.
  */
 
 const BOT_TOKEN = Deno.env.get("BOT_TOKEN") ?? "";
@@ -47,11 +47,13 @@ const BUTTONS = {
   SNOOZE: "Snooze report",
 };
 
-const replyKeyboard = {
-  keyboard: [[{ text: BUTTONS.NEW }], [{ text: BUTTONS.UPDATE }, { text: BUTTONS.CLOSE }], [{ text: BUTTONS.SNOOZE }]],
-  resize_keyboard: true,
-  one_time_keyboard: false,
-};
+// Keyboards
+function kb(rows: (string | { text: string })[][]) {
+  return { reply_markup: { keyboard: rows.map(r => r.map(x => typeof x === "string" ? ({ text: x }) : x)), resize_keyboard: true } };
+}
+const kbMain = kb([[BUTTONS.NEW], [BUTTONS.UPDATE, BUTTONS.CLOSE], [BUTTONS.SNOOZE]]);
+const kbTT = kb([["Truck", "Trailer"]]);
+const kbSnooze = kb([["2h", "4h", "1d"], ["Back to menu"]]);
 
 Deno.serve(async (req) => {
   const url = new URL(req.url);
@@ -122,7 +124,7 @@ async function handleUpdate(update: any) {
       return;
     }
 
-    await sendMessage(chatId, "Choose an action:", { reply_markup: replyKeyboard });
+    await sendMessage(chatId, "Choose an action:", kbMain);
     return;
   } else if (update.callback_query) {
     const cq = update.callback_query;
@@ -134,15 +136,15 @@ async function handleUpdate(update: any) {
     if (data.startsWith("rem:update:")) {
       const reportId = data.split(":")[2];
       await setDialog(userId, { step: "update:await_text", reportId, tmp: {} });
-      await sendMessage(chatId, `Update for #${reportId}: send text`, { reply_markup: replyKeyboard });
+      await sendMessage(chatId, `Update for #${reportId}: send text`, kbMain);
     } else if (data.startsWith("rem:snooze2h:")) {
       const reportId = data.split(":")[2];
       await snoozeReport(reportId, 2 * 60 * 60 * 1000, userId);
-      await sendMessage(chatId, `Snoozed #${reportId} for 2h`, { reply_markup: replyKeyboard });
+      await sendMessage(chatId, `Snoozed #${reportId} for 2h`, kbMain);
     } else if (data.startsWith("rem:close:")) {
       const reportId = data.split(":")[2];
       await setDialog(userId, { step: "close:await_text", reportId, tmp: {} });
-      await sendMessage(chatId, `Close #${reportId}: send resolution`, { reply_markup: replyKeyboard });
+      await sendMessage(chatId, `Close #${reportId}: send resolution`, kbMain);
     } else if (data.startsWith("rem:skip:")) {
       const reportId = data.split(":")[2];
       const r = await getReport(reportId);
@@ -159,19 +161,19 @@ async function startFlow(userId: number, chatId: number, action: string) {
   switch (action) {
     case BUTTONS.NEW:
       await setDialog(userId, { step: "new:asset", tmp: { reportedBy: DEFAULT_REPORTED_BY } });
-      await sendMessage(chatId, "Asset? Type 'Truck' or 'Trailer'");
+      await sendMessage(chatId, "Asset?", kbTT);
       break;
     case BUTTONS.UPDATE:
       await setDialog(userId, { step: "update:report_id", tmp: {} });
-      await sendMessage(chatId, "Enter report id (e.g., R-20251016-001)");
+      await sendMessage(chatId, "Enter report id (e.g., R-20251016-001)", kbMain);
       break;
     case BUTTONS.CLOSE:
       await setDialog(userId, { step: "close:report_id", tmp: {} });
-      await sendMessage(chatId, "Enter report id to close");
+      await sendMessage(chatId, "Enter report id to close", kbMain);
       break;
     case BUTTONS.SNOOZE:
       await setDialog(userId, { step: "snooze:report_id", tmp: {} });
-      await sendMessage(chatId, "Enter report id to snooze");
+      await sendMessage(chatId, "Enter report id to snooze", kbMain);
       break;
   }
 }
@@ -193,45 +195,45 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
   switch (state.step) {
     case "new:asset": {
       const a = parseAsset(text);
-      if (!a) return void (await sendMessage(chatId, "Type 'Truck' or 'Trailer'"));
+      if (!a) return void (await sendMessage(chatId, "Choose Truck or Trailer", kbTT));
       state.tmp.asset = a;
       state.step = a === "Trailer" ? "new:paired" : "new:unit";
       await setDialog(userId, state);
-      await sendMessage(chatId, state.step === "new:paired" ? "Paired truck number?" : "Unit number?");
+      await sendMessage(chatId, state.step === "new:paired" ? "Paired truck number?" : "Unit number?", kbMain);
       return;
     }
     case "new:paired":
       state.tmp.pairedTruck = text.trim();
       state.step = "new:unit";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Unit number?");
+      await sendMessage(chatId, "Unit number?", kbMain);
       return;
     case "new:unit":
       state.tmp.unitNumber = text.trim();
       state.step = "new:repair_side";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Where was repair? Type 'Truck' or 'Trailer'");
+      await sendMessage(chatId, "Where was repair?", kbTT);
       return;
     case "new:repair_side": {
       const a = parseAsset(text);
-      if (!a) return void (await sendMessage(chatId, "Type 'Truck' or 'Trailer'"));
+      if (!a) return void (await sendMessage(chatId, "Choose Truck or Trailer", kbTT));
       state.tmp.repairSide = a;
       state.step = "new:problem";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Problem description?");
+      await sendMessage(chatId, "Problem description?", kbMain);
       return;
     }
     case "new:problem":
       state.tmp.problem = text.trim();
       state.step = "new:plan";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Next steps?");
+      await sendMessage(chatId, "Next steps?", kbMain);
       return;
     case "new:plan":
       state.tmp.plan = text.trim();
       state.step = "new:reported_by";
       await setDialog(userId, state);
-      await sendMessage(chatId, `Reported by? (default: ${DEFAULT_REPORTED_BY})`);
+      await sendMessage(chatId, `Reported by? (default: ${DEFAULT_REPORTED_BY})`, kbMain);
       return;
     case "new:reported_by": {
       state.tmp.reportedBy = text.trim() || DEFAULT_REPORTED_BY;
@@ -246,7 +248,7 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
         reportedByUserId: userId,
       });
       await clearDialog(userId);
-      await sendMessage(chatId, `Created #${report.id}`, { reply_markup: replyKeyboard });
+      await sendMessage(chatId, `Created #${report.id}`, kbMain);
       await postToGroup(formatReport(report, "OPEN"));
       return;
     }
@@ -254,14 +256,14 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       state.reportId = text.trim();
       state.step = "update:await_text";
       await setDialog(userId, state);
-      await sendMessage(chatId, `Update for #${state.reportId}: send text`);
+      await sendMessage(chatId, `Update for #${state.reportId}: send text`, kbMain);
       return;
     case "update:await_text": {
       const rid = state.reportId!;
       const r = await getReport(rid);
       if (!r) {
         await clearDialog(userId);
-        return void (await sendMessage(chatId, "Report not found"));
+        return void (await sendMessage(chatId, "Report not found", kbMain));
       }
       r.status = "open";
       r.snoozedUntil = undefined;
@@ -270,7 +272,7 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       await saveReport(r);
       await addToOpenIndex(r.id);
       await clearDialog(userId);
-      await sendMessage(chatId, `Updated #${rid}`);
+      await sendMessage(chatId, `Updated #${rid}`, kbMain);
       await postToGroup(`#${rid} [UPDATE]\n${text.trim()}`);
       return;
     }
@@ -278,14 +280,14 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       state.reportId = text.trim();
       state.step = "close:await_text";
       await setDialog(userId, state);
-      await sendMessage(chatId, `Close #${state.reportId}: send resolution`);
+      await sendMessage(chatId, `Close #${state.reportId}: send resolution`, kbMain);
       return;
     case "close:await_text": {
       const rid = state.reportId!;
       const r = await getReport(rid);
       if (!r) {
         await clearDialog(userId);
-        return void (await sendMessage(chatId, "Report not found"));
+        return void (await sendMessage(chatId, "Report not found", kbMain));
       }
       r.status = "closed";
       r.snoozedUntil = undefined;
@@ -294,7 +296,7 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       await saveReport(r);
       await removeFromOpenIndex(r.id);
       await clearDialog(userId);
-      await sendMessage(chatId, `Closed #${rid}`);
+      await sendMessage(chatId, `Closed #${rid}`, kbMain);
       await postToGroup(`#${rid} [CLOSED]\nResolution: ${text.trim()}`);
       return;
     }
@@ -302,15 +304,20 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       state.reportId = text.trim();
       state.step = "snooze:await_dur";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Duration? e.g., 4h or 2d");
+      await sendMessage(chatId, "Duration? Tap one or type like 4h/2d", kbSnooze);
       return;
     case "snooze:await_dur": {
+      const x = text.trim().toLowerCase();
+      if (x === "back to menu") {
+        await clearDialog(userId);
+        return void (await sendMessage(chatId, "Choose an action:", kbMain));
+      }
       const ms = parseDuration(text);
-      if (!ms) return void (await sendMessage(chatId, "Use '4h' or '2d'"));
+      if (!ms) return void (await sendMessage(chatId, "Use 2h/4h/1d or 4h/2d", kbSnooze));
       const rid = state.reportId!;
       await snoozeReport(rid, ms, userId);
       await clearDialog(userId);
-      await sendMessage(chatId, `Snoozed #${rid}`);
+      await sendMessage(chatId, `Snoozed #${rid}`, kbMain);
       return;
     }
   }
@@ -367,7 +374,7 @@ async function snoozeReport(reportId: string, ms: number, by?: number) {
   r.status = "snoozed";
   r.history.push({ at: Date.now(), by, text: `snoozed ${Math.round(ms / 3600000)}h`, kind: "snooze" });
   await saveReport(r);
-  await addToOpenIndex(r.id); // остаётся в списке открытых
+  await addToOpenIndex(r.id);
   await postToGroup(`#${reportId} [SNOOZED] until ${new Date(r.snoozedUntil).toISOString()}`);
 }
 
