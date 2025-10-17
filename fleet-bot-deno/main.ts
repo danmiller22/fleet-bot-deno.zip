@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 /**
  * Fleet Reports Bot — Deno Deploy + Telegram
- * Buttons on every step (except numbers). Only Truck/Trailer terms.
+ * Buttons on every step except Problem/Plan. Report ID = number of repair side.
  */
 
 const BOT_TOKEN = Deno.env.get("BOT_TOKEN") ?? "";
@@ -17,13 +17,13 @@ type ReportStatus = "open" | "closed" | "snoozed";
 type AssetType = "Truck" | "Trailer";
 
 interface Report {
-  id: string;
+  id: string;                 // e.g. "4542" or "5678-2"
   status: ReportStatus;
-  asset: AssetType;
+  asset: AssetType;           // original asset of report
   truckNumber?: string;
   trailerNumber?: string;
-  pairedTruck?: string; // only when Trailer
-  repairSide: AssetType;
+  pairedTruck?: string;       // only when Trailer
+  repairSide: AssetType;      // where repair was
   problem: string;
   plan: string;
   reportedBy: string;
@@ -54,8 +54,6 @@ function kb(rows: (string | { text: string })[][]) {
 }
 const kbMain = kb([[BUTTONS.NEW], [BUTTONS.UPDATE, BUTTONS.CLOSE], [BUTTONS.SNOOZE]]);
 const kbTT = kb([["Truck", "Trailer"]]);
-const kbProblems = kb([["Flat tire","Engine"],["Electrical","Brakes"],["PM service","DOT"],["Other (type)"]]);
-const kbPlan = kb([["Send to TA","Mobile mechanic"],["Dealer","Yard"],["Tow","Other (type)"]]);
 const kbReporter = kb([[DEFAULT_REPORTED_BY],["Other (type)"]]);
 const kbSnooze = kb([["2h","4h","1d"],["Back to menu"]]);
 const kbUpdateQuick = kb([["Rolling","Waiting parts"],["At shop","Custom (type)"],["Back to menu"]]);
@@ -170,7 +168,7 @@ async function startFlow(userId: number, chatId: number, action: string) {
       break;
     case BUTTONS.UPDATE:
       await setDialog(userId, { step: "update:report_id", tmp: {} });
-      await sendMessage(chatId, "Enter report id (e.g., R-20251016-001)", kbMain);
+      await sendMessage(chatId, "Enter report id (truck or trailer number)", kbMain);
       break;
     case BUTTONS.CLOSE:
       await setDialog(userId, { step: "close:report_id", tmp: {} });
@@ -232,44 +230,16 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       state.tmp.repairSide = a;
       state.step = "new:problem";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Problem?", kbProblems);
+      await sendMessage(chatId, "Problem?");            // no buttons
       return;
     }
-    case "new:problem": {
-      const v = text.trim();
-      if (v.toLowerCase() === "other (type)") {
-        state.step = "new:problem_text";
-        await setDialog(userId, state);
-        await sendMessage(chatId, "Type problem text");
-        return;
-      }
-      state.tmp.problem = v;
-      state.step = "new:plan";
-      await setDialog(userId, state);
-      await sendMessage(chatId, "Plan?", kbPlan);
-      return;
-    }
-    case "new:problem_text":
+    case "new:problem":
       state.tmp.problem = text.trim();
       state.step = "new:plan";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Plan?", kbPlan);
+      await sendMessage(chatId, "Plan?");               // no buttons
       return;
-    case "new:plan": {
-      const v = text.trim();
-      if (v.toLowerCase() === "other (type)") {
-        state.step = "new:plan_text";
-        await setDialog(userId, state);
-        await sendMessage(chatId, "Type plan text");
-        return;
-      }
-      state.tmp.plan = v;
-      state.step = "new:reported_by";
-      await setDialog(userId, state);
-      await sendMessage(chatId, "Reported by?", kbReporter);
-      return;
-    }
-    case "new:plan_text":
+    case "new:plan":
       state.tmp.plan = text.trim();
       state.step = "new:reported_by";
       await setDialog(userId, state);
@@ -315,10 +285,9 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       if (payload.toLowerCase() === "custom (type)") {
         state.step = "update:text";
         await setDialog(userId, state);
-        await sendMessage(chatId, "Type update text", kbMain);
+        await sendMessage(chatId, "Type update text");
         return;
       }
-      // quick update
       r.status = "open"; r.snoozedUntil = undefined; r.lastUpdateAt = Date.now();
       r.history.push({ at: Date.now(), by: userId, text: payload, kind: "update" });
       await saveReport(r); await addToOpenIndex(r.id); await clearDialog(userId);
@@ -379,7 +348,8 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
 }
 
 async function createReportFromState(userId: number, t: any): Promise<Report> {
-  const id = await nextReportId();
+  const baseId = chooseSimpleId(t);
+  const id = await ensureUniqueId(baseId);
   const now = Date.now();
   const r: Report = {
     id,
@@ -400,6 +370,23 @@ async function createReportFromState(userId: number, t: any): Promise<Report> {
   await saveReport(r);
   await addToOpenIndex(id);
   return r;
+}
+
+// ID = number from repair side (Truck -> truckNumber, Trailer -> trailerNumber).
+function chooseSimpleId(t: any): string {
+  if (t.repairSide === "Truck") {
+    return (t.truckNumber || t.pairedTruck || t.trailerNumber || "unknown").toString();
+  } else {
+    return (t.trailerNumber || "unknown").toString();
+  }
+}
+async function ensureUniqueId(base: string): Promise<string> {
+  let id = base;
+  let n = 2;
+  while ((await kv.get(["report", id])).value) {
+    id = `${base}-${n++}`;
+  }
+  return id;
 }
 
 function formatReport(r: Report, tag: "OPEN" | "UPDATE" | "CLOSED" | "SNOOZED") {
@@ -471,35 +458,17 @@ Need an update?`;
 }
 
 // KV helpers
-async function nextReportId(): Promise<string> {
-  const date = new Date();
-  const ymd = date.toISOString().slice(0, 10).replace(/-/g, "");
-  const key = ["seq", ymd];
-  const cur = (await kv.get<number>(key)).value ?? 0;
-  const next = cur + 1;
-  await kv.set(key, next);
-  const nn = String(next).padStart(3, "0");
-  return `R-${ymd}-${nn}`;
-}
-async function saveReport(r: Report) {
-  await kv.set(["report", r.id], r);
-}
-async function getReport(id: string): Promise<Report | null> {
-  return (await kv.get<Report>(["report", id])).value ?? null;
-}
+async function saveReport(r: Report) { await kv.set(["report", r.id], r); }
+async function getReport(id: string): Promise<Report | null> { return (await kv.get<Report>(["report", id])).value ?? null; }
 async function addToOpenIndex(id: string) {
   const key = ["index", "open"];
   const list = (await kv.get<string[]>(key)).value ?? [];
-  if (!list.includes(id)) {
-    list.push(id);
-    await kv.set(key, list);
-  }
+  if (!list.includes(id)) { list.push(id); await kv.set(key, list); }
 }
 async function removeFromOpenIndex(id: string) {
   const key = ["index", "open"];
   const list = (await kv.get<string[]>(key)).value ?? [];
-  const filtered = list.filter((x) => x !== id);
-  await kv.set(key, filtered);
+  await kv.set(key, list.filter(x => x !== id));
 }
 
 // Dialog state
@@ -509,9 +478,7 @@ async function getDialog(userId: number): Promise<DialogState | null> {
 async function setDialog(userId: number, state: DialogState) {
   await kv.set(["dialog", userId], state, { expireIn: 30 * 60 * 1000 });
 }
-async function clearDialog(userId: number) {
-  await kv.delete(["dialog", userId]);
-}
+async function clearDialog(userId: number) { await kv.delete(["dialog", userId]); }
 
 // Telegram API
 async function sendMessage(chatId: number | string, text: string, extra: any = {}) {
@@ -533,6 +500,4 @@ async function answerCallback(id: string, text?: string) {
     body: JSON.stringify({ callback_query_id: id, text }),
   });
 }
-function json(data: any) {
-  return new Response(JSON.stringify(data), { headers: { "content-type": "application/json" } });
-}
+function json(data: any) { return new Response(JSON.stringify(data), { headers: { "content-type": "application/json" } }); }
