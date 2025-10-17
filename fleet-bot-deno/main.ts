@@ -2,7 +2,7 @@
 /**
  * Fleet Reports Bot — Deno Deploy + Telegram
  * - Buttons почти на всех шагах (без кнопок для Problem/Plan).
- * - После Problem: запрос медиа (photo/video/document), можно несколько.
+ * - После Problem: сбор медиа с кнопками Done/Skip.
  * - После Reported by: превью и подтверждение Post.
  * - Report ID = номер стороны ремонта (Truck->truckNumber, Trailer->trailerNumber), при конфликте -2, -3...
  * - Зеркалит любые медиа из ЛС в группу, КРОМЕ шага создания (new:*), чтобы не уезжали раньше времени.
@@ -61,6 +61,7 @@ const kbTT = kb([["Truck", "Trailer"]]);
 const kbReporter = kb([[DEFAULT_REPORTED_BY], ["Other (type)"]]);
 const kbSnooze = kb([["2h", "4h", "1d"], ["Back to menu"]]);
 const kbUpdateQuick = kb([["Rolling", "Waiting parts"], ["At shop", "Custom (type)"], ["Back to menu"]]);
+const kbMedia = kb([["Done", "Skip"]]); // ← кнопки для завершения сбора медиа
 
 // Inline keyboards
 const ikNewConfirm = {
@@ -135,7 +136,6 @@ async function handleUpdate(update: any) {
       // Mirror media from DM to group unless we are in NEW flow collecting inputs
       if (hasMedia(m)) {
         if (state && state.step.startsWith("new:")) {
-          // collect media for report instead of mirroring now
           await collectMediaInState(userId, state, m);
         } else {
           await mirrorMediaToGroup(m);
@@ -228,7 +228,7 @@ async function collectMediaInState(userId: number, state: DialogState, m: any) {
   state.tmp.mediaMsgIds = state.tmp.mediaMsgIds || [];
   state.tmp.mediaMsgIds.push(m.message_id);
   await setDialog(userId, state);
-  await sendMessage(m.chat.id, `Added media (${state.tmp.mediaMsgIds.length}). Send more or type 'Done'.`);
+  await sendMessage(m.chat.id, `Added media (${state.tmp.mediaMsgIds.length}). Tap Done when finished or Skip.`, kbMedia);
 }
 async function getGroupId(): Promise<string | null> {
   return GROUP_CHAT_ID_ENV || (await kv.get<string>(["groupChatId"])).value || null;
@@ -327,7 +327,7 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       state.tmp.problem = text.trim();
       state.step = "new:media";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Send photos/videos/documents of the damage. Type 'Done' to continue or 'Skip' to skip.");
+      await sendMessage(chatId, "Send photos/videos/documents of the damage. Tap Done when finished or Skip.", kbMedia);
       return;
     case "new:media": {
       const t = text.trim().toLowerCase();
@@ -337,8 +337,8 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
         await sendMessage(chatId, "Plan?"); // free text
         return;
       }
-      // if text while expecting media, just echo hint
-      await sendMessage(chatId, "Send media or type 'Done' / 'Skip'.");
+      // if text while expecting media, just hint again
+      await sendMessage(chatId, "Send media or tap Done / Skip.", kbMedia);
       return;
     }
     case "new:plan":
