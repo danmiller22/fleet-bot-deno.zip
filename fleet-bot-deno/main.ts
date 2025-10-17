@@ -6,6 +6,7 @@
  * - После Reported by: превью и подтверждение Post.
  * - Report ID = номер стороны ремонта (Truck->truckNumber, Trailer->trailerNumber), при конфликте -2, -3...
  * - Зеркалит любые медиа из ЛС в группу, КРОМЕ шага создания (new:*), чтобы не уезжали раньше времени.
+ * - Hourly reminders: Deno.cron("0 * * * *") + /cron ручной триггер.
  */
 
 const BOT_TOKEN = Deno.env.get("BOT_TOKEN") ?? "";
@@ -21,13 +22,13 @@ type ReportStatus = "open" | "closed" | "snoozed";
 type AssetType = "Truck" | "Trailer";
 
 interface Report {
-  id: string;                 // e.g. "4542" or "5678-2"
+  id: string;
   status: ReportStatus;
   asset: AssetType;
   truckNumber?: string;
   trailerNumber?: string;
-  pairedTruck?: string;       // only when Trailer
-  repairSide: AssetType;      // where repair was
+  pairedTruck?: string;
+  repairSide: AssetType;
   problem: string;
   plan: string;
   reportedBy: string;
@@ -40,8 +41,8 @@ interface Report {
 }
 
 interface DialogState {
-  step: string;               // e.g., new:asset, new:media, new:confirm
-  tmp: Record<string, any>;   // collects inputs; tmp.mediaMsgIds: number[]
+  step: string;
+  tmp: Record<string, any>;   // includes mediaMsgIds: number[]
   reportId?: string;
 }
 
@@ -54,14 +55,20 @@ const BUTTONS = {
 
 // Reply keyboards
 function kb(rows: (string | { text: string })[][]) {
-  return { reply_markup: { keyboard: rows.map(r => r.map(x => typeof x === "string" ? ({ text: x }) : x)), resize_keyboard: true, one_time_keyboard: false } };
+  return {
+    reply_markup: {
+      keyboard: rows.map(r => r.map(x => typeof x === "string" ? ({ text: x }) : x)),
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    },
+  };
 }
 const kbMain = kb([[BUTTONS.NEW], [BUTTONS.UPDATE, BUTTONS.CLOSE], [BUTTONS.SNOOZE]]);
 const kbTT = kb([["Truck", "Trailer"]]);
 const kbReporter = kb([[DEFAULT_REPORTED_BY], ["Other (type)"]]);
 const kbSnooze = kb([["2h", "4h", "1d"], ["Back to menu"]]);
 const kbUpdateQuick = kb([["Rolling", "Waiting parts"], ["At shop", "Custom (type)"], ["Back to menu"]]);
-const kbMedia = kb([["Done", "Skip"]]); // ← кнопки для завершения сбора медиа
+const kbMedia = kb([["Done", "Skip"]]);
 
 // Inline keyboards
 const ikNewConfirm = {
@@ -77,11 +84,11 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
   if (req.method === "GET" && url.pathname === "/health") return new Response("ok");
 
-  // Setup webhook from server side
+  // Setup webhook
   if (req.method === "GET" && url.pathname === "/setup_webhook") {
     if (url.searchParams.get("key") !== CRON_KEY) return new Response("forbidden", { status: 403 });
     const webhook = `${url.origin}/webhook`;
-    const tg = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+    const tg = await fetch(`${API}/setWebhook`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ url: webhook }),
@@ -107,9 +114,14 @@ Deno.serve(async (req) => {
   return new Response("not found", { status: 404 });
 });
 
-// Cron (Deno Deploy)
+// Cloud scheduler compatibility
 addEventListener("scheduled", (event: any) => {
   event.waitUntil(runReminders());
+});
+
+// Deno Deploy cron: top of the hour every hour
+Deno.cron?.("hourly-reminders", "0 * * * *", async () => {
+  await runReminders();
 });
 
 async function handleUpdate(update: any) {
@@ -129,11 +141,9 @@ async function handleUpdate(update: any) {
       return;
     }
 
-    // detect active dialog for mirroring suppression
     const state = await getDialog(userId);
 
     if (!isGroup) {
-      // Mirror media from DM to group unless we are in NEW flow collecting inputs
       if (hasMedia(m)) {
         if (state && state.step.startsWith("new:")) {
           await collectMediaInState(userId, state, m);
@@ -177,14 +187,12 @@ async function handleUpdate(update: any) {
         await sendMessage(chatId, "Canceled.", kbMain);
         return;
       }
-      // POST
       const draft = state.tmp;
       const report = await createReportFromState(userId, draft);
       await clearDialog(userId);
       await answerCallback(cq.id, "Posted");
       await sendMessage(chatId, `Created #${report.id}`, kbMain);
       await postToGroup(formatReport(report, "OPEN"));
-      // push media to group
       if (draft.mediaMsgIds?.length) {
         const groupId = await getGroupId();
         if (groupId) {
@@ -337,7 +345,6 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
         await sendMessage(chatId, "Plan?"); // free text
         return;
       }
-      // if text while expecting media, just hint again
       await sendMessage(chatId, "Send media or tap Done / Skip.", kbMedia);
       return;
     }
@@ -356,7 +363,6 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
         return;
       }
       state.tmp.reportedBy = v || DEFAULT_REPORTED_BY;
-      // Preview
       const preview = formatDraft(state.tmp);
       state.step = "new:confirm";
       await setDialog(userId, state);
@@ -372,7 +378,6 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       return;
     }
     case "new:confirm":
-      // waiting for inline button. Ignore text.
       await sendMessage(chatId, "Tap Post or Cancel.", ikNewConfirm);
       return;
 
@@ -494,7 +499,6 @@ async function createReportFromState(userId: number, t: any): Promise<Report> {
   return r;
 }
 
-// ID = number from repair side (Truck -> truckNumber, Trailer -> trailerNumber).
 function chooseSimpleId(t: any): string {
   if (t.repairSide === "Truck") {
     return (t.truckNumber || t.pairedTruck || t.trailerNumber || "unknown").toString();
@@ -505,9 +509,7 @@ function chooseSimpleId(t: any): string {
 async function ensureUniqueId(base: string): Promise<string> {
   let id = base;
   let n = 2;
-  while ((await kv.get(["report", id])).value) {
-    id = `${base}-${n++}`;
-  }
+  while ((await kv.get(["report", id])).value) id = `${base}-${n++}`;
   return id;
 }
 
@@ -622,4 +624,6 @@ async function answerCallback(id: string, text?: string) {
     body: JSON.stringify({ callback_query_id: id, text }),
   });
 }
-function json(data: any) { return new Response(JSON.stringify(data), { headers: { "content-type": "application/json" } }); }
+function json(data: any) {
+  return new Response(JSON.stringify(data), { headers: { "content-type": "application/json" } });
+}
