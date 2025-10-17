@@ -4,7 +4,7 @@
  * One-file implementation. KV-backed. Free tier friendly.
  */
 
-const BOT_TOKEN = Deno.env.get("BOT_TOKEN") ?? "";
+const BOT_TOKEN = Deno.env.get(8287509180:AAG3FZr2LCBYv2wFbuImXotWClPf_OjW-g8) ?? "";
 if (!BOT_TOKEN) {
   throw new Error("BOT_TOKEN env var is required");
 }
