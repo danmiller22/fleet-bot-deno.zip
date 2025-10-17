@@ -1,7 +1,9 @@
 // deno-lint-ignore-file no-explicit-any
 /**
  * Fleet Reports Bot — Deno Deploy + Telegram
- * Buttons on every step except Problem/Plan. Report ID = number of repair side.
+ * Buttons on every step except Problem/Plan.
+ * Report ID = number of repair side.
+ * Mirrors photo/video/document from DM to the group via copyMessage.
  */
 
 const BOT_TOKEN = Deno.env.get("BOT_TOKEN") ?? "";
@@ -19,7 +21,7 @@ type AssetType = "Truck" | "Trailer";
 interface Report {
   id: string;                 // e.g. "4542" or "5678-2"
   status: ReportStatus;
-  asset: AssetType;           // original asset of report
+  asset: AssetType;
   truckNumber?: string;
   trailerNumber?: string;
   pairedTruck?: string;       // only when Trailer
@@ -106,12 +108,20 @@ async function handleUpdate(update: any) {
     const userId = m.from?.id;
     if (!userId) return;
 
-    if (text.startsWith("/setgroup")) {
+    if (text?.startsWith?.("/setgroup")) {
       if (isGroup) {
         await kv.set(["groupChatId"], chatId.toString());
         await sendMessage(chatId, "Group chat linked ✅");
       }
       return;
+    }
+
+    if (!isGroup) {
+      // Mirror media from DM to group
+      if (hasMedia(m)) {
+        await mirrorMediaToGroup(m);
+        return;
+      }
     }
 
     if (isGroup) return;
@@ -158,6 +168,32 @@ async function handleUpdate(update: any) {
       await answerCallback(cq.id, "Skipped");
     }
   }
+}
+
+// Media helpers
+function hasMedia(m: any) {
+  return !!(m.photo || m.video || m.document);
+}
+async function getGroupId(): Promise<string | null> {
+  return GROUP_CHAT_ID_ENV || (await kv.get<string>(["groupChatId"])).value || null;
+}
+async function mirrorMediaToGroup(m: any) {
+  const groupId = await getGroupId();
+  if (!groupId) {
+    await sendMessage(m.chat.id, "Group not linked. Send /setgroup in the group.");
+    return;
+  }
+  // copyMessage keeps media and caption without downloading
+  await fetch(`${API}/copyMessage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      chat_id: groupId,
+      from_chat_id: m.chat.id,
+      message_id: m.message_id,
+    }),
+  });
+  await sendMessage(m.chat.id, "Sent to group ✓");
 }
 
 async function startFlow(userId: number, chatId: number, action: string) {
@@ -230,14 +266,14 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       state.tmp.repairSide = a;
       state.step = "new:problem";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Problem?");            // no buttons
+      await sendMessage(chatId, "Problem?"); // no buttons
       return;
     }
     case "new:problem":
       state.tmp.problem = text.trim();
       state.step = "new:plan";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Plan?");               // no buttons
+      await sendMessage(chatId, "Plan?"); // no buttons
       return;
     case "new:plan":
       state.tmp.plan = text.trim();
