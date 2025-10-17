@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 /**
  * Fleet Reports Bot — Deno Deploy + Telegram
- * One-file. KV-backed. Context keyboards on every step.
+ * Buttons on every step (except numbers). Only Truck/Trailer terms.
  */
 
 const BOT_TOKEN = Deno.env.get("BOT_TOKEN") ?? "";
@@ -20,8 +20,9 @@ interface Report {
   id: string;
   status: ReportStatus;
   asset: AssetType;
-  unitNumber: string;
-  pairedTruck?: string;
+  truckNumber?: string;
+  trailerNumber?: string;
+  pairedTruck?: string; // only when Trailer
   repairSide: AssetType;
   problem: string;
   plan: string;
@@ -49,11 +50,15 @@ const BUTTONS = {
 
 // Keyboards
 function kb(rows: (string | { text: string })[][]) {
-  return { reply_markup: { keyboard: rows.map(r => r.map(x => typeof x === "string" ? ({ text: x }) : x)), resize_keyboard: true } };
+  return { reply_markup: { keyboard: rows.map(r => r.map(x => typeof x === "string" ? ({ text: x }) : x)), resize_keyboard: true, one_time_keyboard: false } };
 }
 const kbMain = kb([[BUTTONS.NEW], [BUTTONS.UPDATE, BUTTONS.CLOSE], [BUTTONS.SNOOZE]]);
 const kbTT = kb([["Truck", "Trailer"]]);
-const kbSnooze = kb([["2h", "4h", "1d"], ["Back to menu"]]);
+const kbProblems = kb([["Flat tire","Engine"],["Electrical","Brakes"],["PM service","DOT"],["Other (type)"]]);
+const kbPlan = kb([["Send to TA","Mobile mechanic"],["Dealer","Yard"],["Tow","Other (type)"]]);
+const kbReporter = kb([[DEFAULT_REPORTED_BY],["Other (type)"]]);
+const kbSnooze = kb([["2h","4h","1d"],["Back to menu"]]);
+const kbUpdateQuick = kb([["Rolling","Waiting parts"],["At shop","Custom (type)"],["Back to menu"]]);
 
 Deno.serve(async (req) => {
   const url = new URL(req.url);
@@ -135,8 +140,8 @@ async function handleUpdate(update: any) {
 
     if (data.startsWith("rem:update:")) {
       const reportId = data.split(":")[2];
-      await setDialog(userId, { step: "update:await_text", reportId, tmp: {} });
-      await sendMessage(chatId, `Update for #${reportId}: send text`, kbMain);
+      await setDialog(userId, { step: "update:quick_or_text", reportId, tmp: {} });
+      await sendMessage(chatId, `Update for #${reportId}: choose or type`, kbUpdateQuick);
     } else if (data.startsWith("rem:snooze2h:")) {
       const reportId = data.split(":")[2];
       await snoozeReport(reportId, 2 * 60 * 60 * 1000, userId);
@@ -144,7 +149,7 @@ async function handleUpdate(update: any) {
     } else if (data.startsWith("rem:close:")) {
       const reportId = data.split(":")[2];
       await setDialog(userId, { step: "close:await_text", reportId, tmp: {} });
-      await sendMessage(chatId, `Close #${reportId}: send resolution`, kbMain);
+      await sendMessage(chatId, `Close #${reportId}: resolution`, kbMain);
     } else if (data.startsWith("rem:skip:")) {
       const reportId = data.split(":")[2];
       const r = await getReport(reportId);
@@ -193,23 +198,30 @@ function parseDuration(s: string): number | null {
 
 async function continueFlow(userId: number, chatId: number, state: DialogState, text: string, _message: any) {
   switch (state.step) {
+    // NEW REPORT
     case "new:asset": {
       const a = parseAsset(text);
       if (!a) return void (await sendMessage(chatId, "Choose Truck or Trailer", kbTT));
       state.tmp.asset = a;
-      state.step = a === "Trailer" ? "new:paired" : "new:unit";
+      state.step = a === "Trailer" ? "new:trailer_num" : "new:truck_num";
       await setDialog(userId, state);
-      await sendMessage(chatId, state.step === "new:paired" ? "Paired truck number?" : "Unit number?", kbMain);
+      await sendMessage(chatId, a === "Trailer" ? "Trailer number?" : "Truck number?");
       return;
     }
-    case "new:paired":
-      state.tmp.pairedTruck = text.trim();
-      state.step = "new:unit";
+    case "new:truck_num":
+      state.tmp.truckNumber = text.trim();
+      state.step = "new:repair_side";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Unit number?", kbMain);
+      await sendMessage(chatId, "Where was repair?", kbTT);
       return;
-    case "new:unit":
-      state.tmp.unitNumber = text.trim();
+    case "new:trailer_num":
+      state.tmp.trailerNumber = text.trim();
+      state.step = "new:paired_truck";
+      await setDialog(userId, state);
+      await sendMessage(chatId, "Paired truck number?");
+      return;
+    case "new:paired_truck":
+      state.tmp.pairedTruck = text.trim();
       state.step = "new:repair_side";
       await setDialog(userId, state);
       await sendMessage(chatId, "Where was repair?", kbTT);
@@ -220,86 +232,132 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       state.tmp.repairSide = a;
       state.step = "new:problem";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Problem description?", kbMain);
+      await sendMessage(chatId, "Problem?", kbProblems);
       return;
     }
-    case "new:problem":
+    case "new:problem": {
+      const v = text.trim();
+      if (v.toLowerCase() === "other (type)") {
+        state.step = "new:problem_text";
+        await setDialog(userId, state);
+        await sendMessage(chatId, "Type problem text");
+        return;
+      }
+      state.tmp.problem = v;
+      state.step = "new:plan";
+      await setDialog(userId, state);
+      await sendMessage(chatId, "Plan?", kbPlan);
+      return;
+    }
+    case "new:problem_text":
       state.tmp.problem = text.trim();
       state.step = "new:plan";
       await setDialog(userId, state);
-      await sendMessage(chatId, "Next steps?", kbMain);
+      await sendMessage(chatId, "Plan?", kbPlan);
       return;
-    case "new:plan":
+    case "new:plan": {
+      const v = text.trim();
+      if (v.toLowerCase() === "other (type)") {
+        state.step = "new:plan_text";
+        await setDialog(userId, state);
+        await sendMessage(chatId, "Type plan text");
+        return;
+      }
+      state.tmp.plan = v;
+      state.step = "new:reported_by";
+      await setDialog(userId, state);
+      await sendMessage(chatId, "Reported by?", kbReporter);
+      return;
+    }
+    case "new:plan_text":
       state.tmp.plan = text.trim();
       state.step = "new:reported_by";
       await setDialog(userId, state);
-      await sendMessage(chatId, `Reported by? (default: ${DEFAULT_REPORTED_BY})`, kbMain);
+      await sendMessage(chatId, "Reported by?", kbReporter);
       return;
     case "new:reported_by": {
-      state.tmp.reportedBy = text.trim() || DEFAULT_REPORTED_BY;
-      const report = await createReport({
-        asset: state.tmp.asset,
-        unitNumber: state.tmp.unitNumber,
-        pairedTruck: state.tmp.pairedTruck,
-        repairSide: state.tmp.repairSide,
-        problem: state.tmp.problem,
-        plan: state.tmp.plan,
-        reportedBy: state.tmp.reportedBy,
-        reportedByUserId: userId,
-      });
+      const v = text.trim();
+      if (v.toLowerCase() === "other (type)") {
+        state.step = "new:reported_by_text";
+        await setDialog(userId, state);
+        await sendMessage(chatId, "Type name");
+        return;
+      }
+      state.tmp.reportedBy = v || DEFAULT_REPORTED_BY;
+      const report = await createReportFromState(userId, state.tmp);
       await clearDialog(userId);
       await sendMessage(chatId, `Created #${report.id}`, kbMain);
       await postToGroup(formatReport(report, "OPEN"));
       return;
     }
+    case "new:reported_by_text": {
+      state.tmp.reportedBy = text.trim() || DEFAULT_REPORTED_BY;
+      const report = await createReportFromState(userId, state.tmp);
+      await clearDialog(userId);
+      await sendMessage(chatId, `Created #${report.id}`, kbMain);
+      await postToGroup(formatReport(report, "OPEN"));
+      return;
+    }
+
+    // UPDATE
     case "update:report_id":
       state.reportId = text.trim();
-      state.step = "update:await_text";
+      state.step = "update:quick_or_text";
       await setDialog(userId, state);
-      await sendMessage(chatId, `Update for #${state.reportId}: send text`, kbMain);
+      await sendMessage(chatId, `Update for #${state.reportId}: choose or type`, kbUpdateQuick);
       return;
-    case "update:await_text": {
+    case "update:quick_or_text": {
       const rid = state.reportId!;
       const r = await getReport(rid);
-      if (!r) {
-        await clearDialog(userId);
-        return void (await sendMessage(chatId, "Report not found", kbMain));
+      if (!r) { await clearDialog(userId); return void (await sendMessage(chatId, "Report not found", kbMain)); }
+      let payload = text.trim();
+      if (payload.toLowerCase() === "back to menu") { await clearDialog(userId); return void (await sendMessage(chatId, "Choose an action:", kbMain)); }
+      if (payload.toLowerCase() === "custom (type)") {
+        state.step = "update:text";
+        await setDialog(userId, state);
+        await sendMessage(chatId, "Type update text", kbMain);
+        return;
       }
-      r.status = "open";
-      r.snoozedUntil = undefined;
-      r.lastUpdateAt = Date.now();
+      // quick update
+      r.status = "open"; r.snoozedUntil = undefined; r.lastUpdateAt = Date.now();
+      r.history.push({ at: Date.now(), by: userId, text: payload, kind: "update" });
+      await saveReport(r); await addToOpenIndex(r.id); await clearDialog(userId);
+      await sendMessage(chatId, `Updated #${rid}`, kbMain);
+      await postToGroup(`#${rid} [UPDATE]\n${payload}`);
+      return;
+    }
+    case "update:text": {
+      const rid = state.reportId!;
+      const r = await getReport(rid);
+      if (!r) { await clearDialog(userId); return void (await sendMessage(chatId, "Report not found", kbMain)); }
+      r.status = "open"; r.snoozedUntil = undefined; r.lastUpdateAt = Date.now();
       r.history.push({ at: Date.now(), by: userId, text: text.trim(), kind: "update" });
-      await saveReport(r);
-      await addToOpenIndex(r.id);
-      await clearDialog(userId);
+      await saveReport(r); await addToOpenIndex(r.id); await clearDialog(userId);
       await sendMessage(chatId, `Updated #${rid}`, kbMain);
       await postToGroup(`#${rid} [UPDATE]\n${text.trim()}`);
       return;
     }
+
+    // CLOSE
     case "close:report_id":
       state.reportId = text.trim();
       state.step = "close:await_text";
       await setDialog(userId, state);
-      await sendMessage(chatId, `Close #${state.reportId}: send resolution`, kbMain);
+      await sendMessage(chatId, `Close #${state.reportId}: resolution`, kbMain);
       return;
     case "close:await_text": {
       const rid = state.reportId!;
       const r = await getReport(rid);
-      if (!r) {
-        await clearDialog(userId);
-        return void (await sendMessage(chatId, "Report not found", kbMain));
-      }
-      r.status = "closed";
-      r.snoozedUntil = undefined;
-      r.lastUpdateAt = Date.now();
+      if (!r) { await clearDialog(userId); return void (await sendMessage(chatId, "Report not found", kbMain)); }
+      r.status = "closed"; r.snoozedUntil = undefined; r.lastUpdateAt = Date.now();
       r.history.push({ at: Date.now(), by: userId, text: text.trim(), kind: "close" });
-      await saveReport(r);
-      await removeFromOpenIndex(r.id);
-      await clearDialog(userId);
+      await saveReport(r); await removeFromOpenIndex(r.id); await clearDialog(userId);
       await sendMessage(chatId, `Closed #${rid}`, kbMain);
       await postToGroup(`#${rid} [CLOSED]\nResolution: ${text.trim()}`);
       return;
     }
+
+    // SNOOZE
     case "snooze:report_id":
       state.reportId = text.trim();
       state.step = "snooze:await_dur";
@@ -308,10 +366,7 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
       return;
     case "snooze:await_dur": {
       const x = text.trim().toLowerCase();
-      if (x === "back to menu") {
-        await clearDialog(userId);
-        return void (await sendMessage(chatId, "Choose an action:", kbMain));
-      }
+      if (x === "back to menu") { await clearDialog(userId); return void (await sendMessage(chatId, "Choose an action:", kbMain)); }
       const ms = parseDuration(text);
       if (!ms) return void (await sendMessage(chatId, "Use 2h/4h/1d or 4h/2d", kbSnooze));
       const rid = state.reportId!;
@@ -323,29 +378,21 @@ async function continueFlow(userId: number, chatId: number, state: DialogState, 
   }
 }
 
-async function createReport(input: {
-  asset: AssetType;
-  unitNumber: string;
-  pairedTruck?: string;
-  repairSide: AssetType;
-  problem: string;
-  plan: string;
-  reportedBy: string;
-  reportedByUserId?: number;
-}): Promise<Report> {
+async function createReportFromState(userId: number, t: any): Promise<Report> {
   const id = await nextReportId();
   const now = Date.now();
   const r: Report = {
     id,
     status: "open",
-    asset: input.asset,
-    unitNumber: input.unitNumber,
-    pairedTruck: input.pairedTruck,
-    repairSide: input.repairSide,
-    problem: input.problem,
-    plan: input.plan,
-    reportedBy: input.reportedBy,
-    reportedByUserId: input.reportedByUserId,
+    asset: t.asset,
+    truckNumber: t.truckNumber,
+    trailerNumber: t.trailerNumber,
+    pairedTruck: t.pairedTruck,
+    repairSide: t.repairSide,
+    problem: t.problem,
+    plan: t.plan,
+    reportedBy: t.reportedBy || DEFAULT_REPORTED_BY,
+    reportedByUserId: userId,
     createdAt: now,
     lastUpdateAt: now,
     history: [],
@@ -356,9 +403,12 @@ async function createReport(input: {
 }
 
 function formatReport(r: Report, tag: "OPEN" | "UPDATE" | "CLOSED" | "SNOOZED") {
+  const assetLine = r.asset === "Truck"
+    ? `Truck ${r.truckNumber ?? "?"}`
+    : `Trailer ${r.trailerNumber ?? "?"}${r.pairedTruck ? ` (paired truck ${r.pairedTruck})` : ""}`;
   const parts = [
     `#${r.id} [${tag}]`,
-    `Asset: ${r.asset} ${r.unitNumber}${r.pairedTruck ? ` (paired truck ${r.pairedTruck})` : ""}`,
+    `Asset: ${assetLine}`,
     `Repair side: ${r.repairSide}`,
     `Problem: ${r.problem}`,
     `Plan: ${r.plan}`,
@@ -411,8 +461,9 @@ async function runReminders() {
 }
 
 function reminderText(r: Report) {
+  const asset = r.asset === "Truck" ? `Truck ${r.truckNumber ?? "?"}` : `Trailer ${r.trailerNumber ?? "?"}`;
   return `Reminder for #${r.id}
-Asset: ${r.asset} ${r.unitNumber}
+Asset: ${asset}
 Problem: ${r.problem}
 Last update: ${new Date(r.lastUpdateAt).toISOString()}
 
