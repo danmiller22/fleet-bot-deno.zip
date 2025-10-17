@@ -1,0 +1,11 @@
+{
+  "tasks": {
+    "dev": "deno run -A --watch main.ts"
+  },
+  "deploy": {
+    "project": "fleet-bot-deno",
+    "exclude": [
+      "*.zip"
+    ]
+  }
+}
